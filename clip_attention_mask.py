@@ -381,7 +381,6 @@ class SD1AttentionTokenizer(SD1Tokenizer):
             batched_tokens = [[(t, w) for t, w,_ in x] for x in batched_tokens]
 
         return batched_tokens
-
 class CLIPAttentionMaskEncode:
     
     causal = ["Yes", "No", "No (fully)", "No (mirrored)"]
@@ -389,52 +388,72 @@ class CLIPAttentionMaskEncode:
     @classmethod
     def INPUT_TYPES(cls):
         return {"required": {"text": ("STRING", {"multiline": True}), "clip": ("CLIP", ), "default_emphasis": ("FLOAT", {"default": 1.1, "min": 0.0, "max": 2.0, "step": 0.01}), "causal": (cls.causal,)}}
-    RETURN_TYPES = ("CONDITIONING","IMAGE", "IMAGE")
+    RETURN_TYPES = ("CONDITIONING", "IMAGE", "IMAGE")
     FUNCTION = "encode"
-
     CATEGORY = "conditioning"
 
     def encode(self, text, clip, default_emphasis, causal):
-        old_tokenizer = clip.tokenizer
-            
-        pre_func = clip.cond_stage_model.transformer.text_model._build_causal_attention_mask
         clip.tokenizer = SD1AttentionTokenizer(clip.tokenizer)
-        if 'ful' in causal.lower():
-            clip.tokenizer.fully_causal = True
-        if 'mir' in causal.lower():
-            clip.tokenizer.mirrored_causal = True
-        if causal.lower().startswith("n"):
-            clip.tokenizer.causal = False
         clip.tokenizer.default_emphasis = default_emphasis
-        def pre_hook(f):
-            @wraps(f)
-            def forward_wrapper(bsz, seq_len, dtype, device=None):
-                mask = torch.empty(bsz, seq_len, seq_len, dtype=dtype, device=device)
-                mask.fill_(torch.finfo(dtype).min)
-                for i, adj_matrix in enumerate(clip.tokenizer.adj_matrices):
-                    mask[i, :adj_matrix.shape[0], :adj_matrix.shape[1]] = adj_matrix
-                return mask.unsqueeze(1)
-            return forward_wrapper
-        clip.cond_stage_model.transformer.text_model._build_causal_attention_mask = pre_hook(pre_func)
-        out = [[clip.encode(text), {}]]
-        img = clip.tokenizer.graph_img
-        #Plot adjacency matrices
-        fig, ax = plt.subplots(1, len(clip.tokenizer.adj_matrices), figsize=(8*len(clip.tokenizer.adj_matrices), 8))
-        ax = np.atleast_1d(ax)
-        ax = ax.flatten()
-        for i, adj_matrix in enumerate(clip.tokenizer.adj_matrices):
-            labels = clip.tokenizer.text_batches[i]
-            disp = ConfusionMatrixDisplay(adj_matrix.cpu().numpy(), display_labels=labels).plot(ax=ax[i], xticks_rotation=90, colorbar=False, include_values=False, cmap='gray')
-            
-            disp.ax_.set_title(f"Adjacency Matrix {i}")
-        fig.canvas.draw()
-        adj_img = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
-        adj_img = adj_img.reshape(fig.canvas.get_width_height()[::-1] + (3,))
-        adj_img = torch.from_numpy(adj_img.copy()).unsqueeze(0) / 255.0
-        plt.close(fig)
-        clip.tokenizer = old_tokenizer
-        clip.cond_stage_model.transformer.text_model._build_causal_attention_mask = pre_func
-        return (out, img, adj_img)
+
+        # Adjust causal settings based on input
+        if 'ful' in causal.lower():
+            fully_causal = True
+        else:
+            fully_causal = False
+        if 'mir' in causal.lower():
+            mirrored_causal = True
+        else:
+            mirrored_causal = False
+        
+        # Tokenize text and generate custom attention masks based on the tokenizer's output
+        def build_custom_attention_mask(bsz, seq_len, dtype, fully_causal=False, mirrored_causal=False):
+            """
+            Generates custom attention masks for encoding with CLIP models.
+
+            Parameters:
+            - bsz (int): Batch size, number of sequences.
+            - seq_len (int): Sequence length of each input.
+            - dtype: Data type of the generated mask, e.g., torch.float32.
+            - fully_causal (bool): If True, enforces causal attention across the whole sequence.
+            - mirrored_causal (bool): If True, applies mirrored causal attention.
+
+            Returns:
+            - torch.Tensor: A tensor representing the custom attention masks.
+            """
+
+            # Initialize the base mask with small values to signify no attention connection
+            mask = torch.full((bsz, 1, seq_len, seq_len), torch.finfo(dtype).min, dtype=dtype)
+
+            if fully_causal:
+                # For fully causal attention, we mask out attention from future tokens
+                mask = mask.triu(1)
+            elif mirrored_causal:
+                # For mirrored causal attention, we allow bi-directional attention but maintain causal structure
+                # We create a mirrored mask and combine it with the standard causal mask
+                mirrored_mask = torch.full((bsz, 1, seq_len, seq_len), torch.finfo(dtype).min, dtype=dtype)
+                mirrored_mask = mirrored_mask.tril(-1) + mirrored_mask.triu(1)
+                mask = mask + mirrored_mask
+            else:
+                # Standard causal mask (forward direction only)
+                mask = mask.triu(1)
+
+            return mask
+
+        tokens = clip.tokenizer.tokenize(text)  # Assuming tokenize() method returns tokenized input suitable for the model
+        bsz = len(tokens)  # Batch size
+        seq_len = max(len(t) for t in tokens)  # Max sequence length
+        dtype = torch.float32  # Assuming dtype for masks; adjust as needed
+        
+        # Build custom attention masks
+        custom_masks = build_custom_attention_mask(bsz, seq_len, dtype, fully_causal=fully_causal, mirrored_causal=mirrored_causal)
+
+        # Encode text with custom attention masks
+        # Assuming clip has a method to accept tokens and masks, adjust as necessary
+        encoded_outputs = clip.model.forward(tokens, attention_mask=custom_masks)
+
+        # Continue with any additional processing and return
+        return encoded_outputs
 
 NODE_CLASS_MAPPINGS = {
     "CLIPAttentionMaskEncode": CLIPAttentionMaskEncode,
