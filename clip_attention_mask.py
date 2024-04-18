@@ -172,6 +172,7 @@ class SD1AttentionTokenizer(SD1Tokenizer):
         self.causal = True
         self.fully_causal = False
         self.mirrored_causal = False
+        self.pad_with_end = True
     
     def tokenize_with_weights(self, text:str, return_word_ids=False):
         '''
@@ -440,7 +441,7 @@ class CLIPAttentionMaskEncode:
 
             return mask
 
-        tokens = clip.tokenizer.tokenize(text)  # Assuming tokenize() method returns tokenized input suitable for the model
+        tokens = clip.tokenizer.tokenize_with_weights(text) # Assuming tokenize() method returns tokenized input suitable for the model
         bsz = len(tokens)  # Batch size
         seq_len = max(len(t) for t in tokens)  # Max sequence length
         dtype = torch.float32  # Assuming dtype for masks; adjust as needed
